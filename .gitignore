@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+go_master_data/
+gomaster.log
+gtp_logs/
+.pytest_cache/

@@ -68,5 +68,40 @@ class TestParseInfoLines:
         assert parse_info_lines(["= KataGo", "", "info garbage"]) == []
 
 
+class TestMultiCandidateLine:
+    """KataGo 把一次刷新的所有候选拼在同一行，必须逐块拆开解析。"""
+
+    LINE = (
+        "info move D4 visits 148 utility 0.316 winrate 0.654944 scoreMean 0.865 "
+        "scoreStdev 12.7 scoreLead 0.865254 order 0 pv D4 C17 D17 C16 "
+        "info move D3 visits 32 utility 0.273 winrate 0.636003 scoreMean 0.681 "
+        "scoreStdev 12.8 scoreLead 0.681544 order 1 pv D3 C17 D17 "
+        "info move C4 visits 19 utility 0.261 winrate 0.632100 scoreMean 0.554 "
+        "scoreStdev 12.9 scoreLead 0.554000 order 2 pv C4 C17 D17 C16 D15"
+    )
+
+    def test_all_candidates_parsed(self):
+        cands = parse_info_lines([self.LINE])
+        assert [c["move"] for c in cands] == ["D4", "D3", "C4"]
+
+    def test_pv_not_polluted_by_next_block(self):
+        """回归：贪婪 pv 会把后续 'info move ...' 一起吞进变化图。"""
+        cands = parse_info_lines([self.LINE])
+        d4 = next(c for c in cands if c["move"] == "D4")
+        assert d4["pv"] == ["D4", "C17", "D17", "C16"]
+        assert all("info" not in c["pv"] for c in cands)
+
+    def test_visits_not_truncated(self):
+        """回归：只解析首块时，后续候选的 visits 会停留在偏小的旧快照。"""
+        cands = parse_info_lines([self.LINE])
+        assert {c["move"]: c["visits"] for c in cands} == {"D4": 148, "D3": 32, "C4": 19}
+
+    def test_last_block_without_pv(self):
+        line = ("info move D4 visits 5 winrate 0.5 scoreLead 0.0 pv D4 Q16 "
+                "info move E5 visits 3 winrate 0.4 scoreLead -1.0")
+        cands = parse_info_lines([line])
+        assert next(c for c in cands if c["move"] == "E5")["pv"] == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

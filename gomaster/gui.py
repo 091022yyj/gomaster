@@ -41,10 +41,20 @@ class GomasterGUI:
         self.my_color: Optional[str] = None
 
         root.title("GoMaster - AI 围棋助手（手动 / 全自动）")
-        root.geometry("1180x700")
 
         self._build_ui()
+        self._fit_window()
         self._refresh_preview()
+
+    def _fit_window(self) -> None:
+        """按内容实际需要开窗，并压进屏幕可视范围。
+
+        Tk 在 macOS 上行高比 Windows 大，写死 1180x700 会把底部控制栏顶出屏幕外。
+        """
+        self.root.update_idletasks()
+        w = min(max(self.root.winfo_reqwidth(), 1180), self.root.winfo_screenwidth() - 40)
+        h = min(self.root.winfo_reqheight(), self.root.winfo_screenheight() - 120)
+        self.root.geometry(f"{w}x{h}+40+40")
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -109,6 +119,10 @@ class GomasterGUI:
                 combo.current(0)
         ttk.Label(row, text="（对局窗口放哪块屏就选哪块）").pack(side="left")
 
+        # 底部控制栏先 pack 并锚到底：空间不够时被压缩的应是预览区而非按钮
+        bottom = ttk.Frame(self.root, padding=8)
+        bottom.pack(side="bottom", fill="x")
+
         # 主区域：预览 + 分析面板
         mid = ttk.Frame(self.root, padding=8)
         mid.pack(fill="both", expand=True)
@@ -125,8 +139,6 @@ class GomasterGUI:
         self.panel = AnalysisPanel(right)
 
         # 底部：日志 + 控制
-        bottom = ttk.Frame(self.root, padding=8)
-        bottom.pack(fill="x")
         self.log = tk.Text(bottom, height=7, state="disabled")
         self.log.pack(fill="x")
 

@@ -1,13 +1,25 @@
-"""悬浮窗单元测试：画布坐标换算与胜率配色（不创建真实窗口）。"""
+"""悬浮窗单元测试：画布坐标换算，以及标记不会被识别成棋子。"""
 import os
 import sys
 
+import cv2
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from gomaster.board_recognition import BoardModel  # noqa: E402
-from gomaster.overlay import _wr_color, canvas_xy  # noqa: E402
+from gomaster.overlay import (  # noqa: E402
+    MARKER_COLOR,
+    MARKER_RADIUS_CELLS,
+    MARKER_WIDTH,
+    canvas_xy,
+)
+
+# 与 recognize_stones 保持一致
+SAMPLE_WINDOW_CELLS = 0.72
+DARK_OFFSET = 60
+LIGHT_OFFSET = 20
 
 
 @pytest.fixture
@@ -28,23 +40,35 @@ class TestCanvasXY:
     def test_center_maps_to_canvas_center(self, board):
         assert canvas_xy(board, (400, 300), 9, 9) == (90.0, 90.0)
 
-    def test_without_offset_markers_fall_outside_canvas(self, board):
-        """回归：不减原点时标记整体偏移一个棋盘位置，几乎全被画布裁掉。"""
-        wrong = board.point_to_xy(0, 0)
-        assert wrong == (400.0, 300.0)
-        assert wrong[0] > 180 and wrong[1] > 180  # 画布只有 180×180
 
+class TestMarkerNotMistakenForStone:
+    """回归：填充的红色候选点被当成黑子同步进引擎，胜率越高越红、越红越像黑子。
 
-class TestWinrateColor:
-    def test_low_winrate_is_blue(self):
-        assert _wr_color(0.0) == "#4682ff"
+    实测红色标记灰度 118，低于黑子阈值 bg-60=143，一个圆点就是一颗假黑子。
+    """
 
-    def test_high_winrate_is_red(self):
-        assert _wr_color(1.0) == "#ff3c3c"
+    @pytest.mark.parametrize("cell", [20.0, 41.5, 60.0])
+    def test_ring_falls_outside_sampling_window(self, cell):
+        """采样窗是边长 cell*0.72 的方块，圆环内边必须在它的角点之外。"""
+        half = max(8, int(cell * SAMPLE_WINDOW_CELLS)) // 2
+        corner = half * np.sqrt(2)
+        inner_edge = cell * MARKER_RADIUS_CELLS - MARKER_WIDTH / 2
+        assert inner_edge > corner
 
-    def test_clamps_out_of_range(self):
-        assert _wr_color(-5.0) == _wr_color(0.0)
-        assert _wr_color(99.0) == _wr_color(1.0)
+    def test_marker_color_counts_as_neither_dark_nor_light(self):
+        """第二重保险：标记灰度落在暗、亮两个阈值之间，两边都不计数。"""
+        rgb = MARKER_COLOR.lstrip("#")
+        bgr = np.array([[[int(rgb[4:6], 16), int(rgb[2:4], 16), int(rgb[0:2], 16)]]],
+                       dtype=np.uint8)
+        gray = int(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)[0, 0])
+        bg = 203  # 实测腾讯围棋棋盘的背景中位亮度
+        assert bg - DARK_OFFSET < gray < bg + LIGHT_OFFSET
+
+    def test_pure_red_would_have_been_mistaken_for_black(self):
+        """反证：换成原来的红色就会掉进黑子区间。"""
+        red = np.array([[[60, 60, 255]]], dtype=np.uint8)  # BGR
+        gray = int(cv2.cvtColor(red, cv2.COLOR_BGR2GRAY)[0, 0])
+        assert gray < 203 - DARK_OFFSET
 
 
 if __name__ == "__main__":

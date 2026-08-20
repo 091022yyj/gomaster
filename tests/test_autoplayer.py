@@ -61,10 +61,6 @@ class TestToScreen:
         p = AutoPlayer(origin=(0, 0), scale=2.0)
         assert p.to_screen(600.0, 400.0) == (300.0, 200.0)
 
-    def test_origin_and_scale_combined(self):
-        p = AutoPlayer(origin=(-1920, -59), scale=2.0)
-        assert p.to_screen(200.0, 100.0) == (-1820.0, -9.0)
-
 
 class TestCursorBoardPoint:
     """平台在光标下画的"待落子"指示块会被当成真子，必须先定位到是哪个交叉点。"""

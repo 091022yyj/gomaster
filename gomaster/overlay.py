@@ -1,8 +1,12 @@
 """
-透明置顶悬浮窗：叠加在围棋平台窗口上方，实时显示
-- AI 推荐落点（闪烁圈 + "AI 推荐" 标签）
-- 各候选点的实时胜率（圆点 + 百分比，胜率越高越红越大）
-- 坐标开关（显示行/列标号）
+透明置顶悬浮窗：叠加在围棋平台窗口上方，只标出 AI 推荐的下一手。
+
+标记必须画得让识别采不到，否则会被当成真棋子同步进引擎、把胜率越推越高、
+越高越红、越红越像黑子——形成自我投毒的死循环（实测红色标记灰度 118，
+低于黑子阈值 143，一个候选点圆点就被认成一颗黑子）。因此：
+- 只画细圆环，不填充，半径大于采样窗（cell*0.72 的方块）
+- 交叉点上不写任何文字
+- 环的颜色取灰度落在"既不够暗也不够亮"的区间，作为第二重保险
 
 透明与穿透按平台分流：
 - Windows：-transparentcolor 把纯黑背景抠成全透明；WS_EX_TRANSPARENT 让点击穿透
@@ -20,23 +24,9 @@ import tkinter as tk
 from typing import List, Optional, Tuple
 
 TRANSPARENT_KEY = "#000000"
-
-# 候选点颜色（胜率从低到高：蓝 → 绿 → 黄 → 红）
-WR_COLORS = [
-    (70, 130, 255),   # 蓝
-    (80, 200, 120),   # 绿
-    (255, 210, 60),   # 黄
-    (255, 120, 60),   # 橙
-    (255, 60, 60),    # 红
-]
-
-
-def _wr_color(winrate: float) -> str:
-    """胜率 [0,1] → 颜色。"""
-    t = max(0.0, min(1.0, winrate))
-    idx = min(len(WR_COLORS) - 1, int(t * len(WR_COLORS)))
-    r, g, b = WR_COLORS[idx]
-    return f"#{r:02x}{g:02x}{b:02x}"
+MARKER_COLOR = "#00ff88"     # 灰度约 165，落在暗阈值 143 与亮阈值 223 之间
+MARKER_RADIUS_CELLS = 0.62   # 采样窗半对角最大约 0.5 格，环画在它外面
+MARKER_WIDTH = 2
 
 
 def canvas_xy(board, origin: Tuple[int, int], x: int, y: int) -> Tuple[float, float]:
@@ -182,36 +172,13 @@ class BoardOverlay:
 
     def _redraw(self) -> None:
         try:
-            c = self.canvas
-            c.delete("all")
-            # 坐标标号（外框边缘，小字）
-            if self.show_coords and len(self.board.corners) == 4:
-                for i in range(self.board.size):
-                    x, _ = canvas_xy(self.board, self._origin, i, 0)
-                    c.create_text(x, 6, text=self.board.to_gtp(i, 0)[0],
-                                  fill="#cccccc", font=("Arial", 7))
-                    _, y = canvas_xy(self.board, self._origin, 0, i)
-                    c.create_text(6, y, text=str(self.board.size - i),
-                                  fill="#cccccc", font=("Arial", 7))
-            # 候选点（圆点 + 胜率）
-            for cand in self._cands:
-                pt = self.board.from_gtp(cand.get("move", ""))
-                if pt is None:
-                    continue
-                sx, sy = canvas_xy(self.board, self._origin, *pt)
-                wr = float(cand.get("winrate", 0.5))
-                r = 9 + int(wr * 14)  # 胜率越高越大
-                c.create_oval(sx - r, sy - r, sx + r, sy + r,
-                              fill=_wr_color(wr), outline="white", width=1)
-                c.create_text(sx, sy, text=f"{wr*100:.0f}",
-                              fill="white", font=("Arial", 8, "bold"))
-            # 推荐落点（闪烁圈）
-            if self._recommend is not None and self._flash:
-                sx, sy = canvas_xy(self.board, self._origin, *self._recommend)
-                c.create_oval(sx - 16, sy - 16, sx + 16, sy + 16,
-                              outline="#00ff88", width=3)
-                c.create_text(sx, sy - 24, text="AI 推荐",
-                              fill="#00ff88", font=("Arial", 9, "bold"))
+            self.canvas.delete("all")
+            if self._recommend is None or not self._flash:
+                return
+            sx, sy = canvas_xy(self.board, self._origin, *self._recommend)
+            r = self.board.cell_size() * MARKER_RADIUS_CELLS
+            self.canvas.create_oval(sx - r, sy - r, sx + r, sy + r,
+                                    outline=MARKER_COLOR, width=MARKER_WIDTH)
         except Exception:
             pass
 

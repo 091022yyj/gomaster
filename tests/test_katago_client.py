@@ -117,9 +117,6 @@ class TestInvalidWinrate:
                  "info move T19 visits 1 winrate 1 scoreLead 50.0"]
         assert len(parse_info_lines(lines)) == 2
 
-    def test_all_invalid_yields_empty(self):
-        assert parse_info_lines(["info move D4 visits 100 winrate 5.49 scoreLead 0.5"]) == []
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

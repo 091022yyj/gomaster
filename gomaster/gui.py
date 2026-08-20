@@ -103,7 +103,12 @@ class GomasterGUI:
 
         row = ttk.Frame(top)
         row.pack(fill="x", pady=2)
-        ttk.Label(row, text="识别屏幕:").pack(side="left")
+        ttk.Label(row, text="我执:").pack(side="left")
+        self.var_color = tk.StringVar(value=self.cfg.my_color)
+        for text, value in (("自动判断", "auto"), ("● 黑", "B"), ("○ 白", "W")):
+            ttk.Radiobutton(row, text=text, value=value,
+                            variable=self.var_color).pack(side="left", padx=2)
+        ttk.Label(row, text="   识别屏幕:").pack(side="left")
         self._monitors = list_monitors()
         self.var_monitor = tk.StringVar()
         combo = ttk.Combobox(row, textvariable=self.var_monitor, width=34, state="readonly",
@@ -185,6 +190,7 @@ class GomasterGUI:
         self.cfg.overlay_coords = self.var_coords.get()
         self.cfg.sound = self.var_sound.get()
         self.cfg.monitor = self._selected_monitor().index
+        self.cfg.my_color = self.var_color.get()
         return self.cfg
 
     def _selected_monitor(self) -> Monitor:

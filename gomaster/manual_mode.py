@@ -128,6 +128,7 @@ class ManualMode:
         self.on_status("手动模式运行中（悬浮窗显示 AI 建议，点击棋盘落子）...")
         last_state = np.zeros_like(self.state)
         last_analysis = 0.0
+        analyzed = None
         while not self._stop.is_set():
             try:
                 if self.board is None:
@@ -159,10 +160,11 @@ class ManualMode:
                         self.on_status(f"落子 {gtp}")
                     last_state[y, x] = color  # 只推进已采信的点，待确认的下帧继续观察
 
-                # 持续分析（节流：至少间隔 1.5 秒，避免刷屏/引擎过载）
+                # 局面没变就不重算：围棋是回合制，重复分析同一局面纯属空耗 GPU
                 now = time.time()
-                if now - last_analysis >= 1.5:
+                if now - last_analysis >= 1.5 and not np.array_equal(state, analyzed):
                     last_analysis = now
+                    analyzed = state.copy()
                     self._analyze()
 
                 time.sleep(max(0.2, self.config.interval))
@@ -171,10 +173,25 @@ class ManualMode:
                 time.sleep(1.0)
 
     # ------------------------------------------------------------------
+    def _my_player(self) -> Optional[int]:
+        """配置里指定的执棋方（1 黑 / -1 白）；auto 时返回 None 表示不区分。"""
+        if self.config.my_color == "B":
+            return 1
+        if self.config.my_color == "W":
+            return -1
+        return None
+
     def _analyze(self) -> None:
         if not self.engine:
             return
-        color = "B" if self._turn_color() == 1 else "W"
+        turn = self._turn_color()
+        mine = self._my_player()
+        if mine is not None and turn != mine:
+            if self.overlay:
+                self.overlay.update([], None)
+            self.on_status("轮到对手，等待落子…")
+            return
+        color = "B" if turn == 1 else "W"
         try:
             cands, summary = self.engine.analyze(color, self.config.think_seconds)
             self.last_summary = summary

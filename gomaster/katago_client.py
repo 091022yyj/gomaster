@@ -35,11 +35,14 @@ def parse_info_lines(lines: List[str], max_candidates: int = 5) -> List[Dict]:
             if not m:
                 continue
             move, visits = m.group(1), int(m.group(2))
+            winrate = float(m.group(3))
+            if not 0.0 <= winrate <= 1.0:
+                continue  # 胜率越界即无效数据，放进候选会让"AI 推荐"指向垃圾着法
             if move in seen and visits <= seen[move]["visits"]:
                 continue
             pv = _INFO_PV.search(block)
-            seen[move] = {"move": move, "visits": visits,
-                          "winrate": float(m.group(3)), "scoreLead": float(m.group(4)),
+            seen[move] = {"move": move, "visits": visits, "winrate": winrate,
+                          "scoreLead": float(m.group(4)),
                           "pv": pv.group(1).split()[:12] if pv else []}
     cands = sorted(seen.values(), key=lambda c: -c["winrate"])
     return cands[:max_candidates]

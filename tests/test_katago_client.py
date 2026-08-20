@@ -103,5 +103,23 @@ class TestMultiCandidateLine:
         assert next(c for c in cands if c["move"] == "E5")["pv"] == []
 
 
+class TestInvalidWinrate:
+    """胜率越界即无效数据：让它进候选就等于让 AI 推荐一个垃圾着法。"""
+
+    def test_drops_out_of_range_winrate(self):
+        lines = ["info move D4 visits 100 winrate 9.97 scoreLead 0.5",
+                 "info move Q16 visits 50 winrate 0.62 scoreLead 1.0"]
+        cands = parse_info_lines(lines)
+        assert [c["move"] for c in cands] == ["Q16"]
+
+    def test_keeps_boundary_values(self):
+        lines = ["info move A1 visits 1 winrate 0 scoreLead -50.0",
+                 "info move T19 visits 1 winrate 1 scoreLead 50.0"]
+        assert len(parse_info_lines(lines)) == 2
+
+    def test_all_invalid_yields_empty(self):
+        assert parse_info_lines(["info move D4 visits 100 winrate 5.49 scoreLead 0.5"]) == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1,14 +1,83 @@
 """主循环单元测试：轮次跟踪 / 局面对比 / 落子判定。"""
 import os
 import sys
+from collections import namedtuple
 
 import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from gomaster import autoplayer as ap  # noqa: E402
+from gomaster.board_recognition import BoardModel  # noqa: E402
 from gomaster.config import Config  # noqa: E402
 from gomaster.main_loop import GoMasterLoop  # noqa: E402
+
+Point = namedtuple("Point", "x y")
+
+
+class FakeMouse:
+    def __init__(self, x, y):
+        self.pos = Point(x, y)
+
+    def position(self):
+        return self.pos
+
+
+@pytest.fixture
+def hover_loop(monkeypatch):
+    """棋盘格距 10px、原点 (100,100)；光标停在交叉点 (4, 6)。"""
+    monkeypatch.setattr(ap, "_HAS_PYAUTOGUI", True)
+    monkeypatch.setattr(ap, "pyautogui", FakeMouse(140.0, 160.0))
+    loop = GoMasterLoop(Config(my_color="W"), on_status=lambda s: None)
+    loop.my_color = "W"
+    loop.board = BoardModel(19, [(100, 100), (280, 100), (280, 280), (100, 280)])
+    return loop
+
+
+class TestCursorMasking:
+    """对局平台在光标下画的指示块会被识别成真子，进而把假棋同步进引擎。"""
+
+    def test_masks_phantom_stone_under_cursor(self, hover_loop):
+        confirmed = np.zeros((19, 19), dtype=int)
+        frame = confirmed.copy()
+        frame[6, 4] = 1  # 光标处冒出的"黑子"其实是指示块
+        hover_loop._mask_cursor(frame, confirmed)
+        assert frame[6, 4] == 0
+        assert hover_loop._detect_new_stones(confirmed, frame) == []
+
+    def test_keeps_ai_just_clicked_point(self, hover_loop):
+        """AI 刚点下的那点是真子，抹掉会导致我方这手同步不进引擎。"""
+        hover_loop._last_click_point = (4, 6)
+        confirmed = np.zeros((19, 19), dtype=int)
+        frame = confirmed.copy()
+        frame[6, 4] = -1
+        hover_loop._mask_cursor(frame, confirmed)
+        assert frame[6, 4] == -1
+
+    def test_leaves_other_points_untouched(self, hover_loop):
+        confirmed = np.zeros((19, 19), dtype=int)
+        frame = confirmed.copy()
+        frame[6, 4] = 1   # 光标处（假）
+        frame[10, 10] = 1  # 别处真落子
+        hover_loop._mask_cursor(frame, confirmed)
+        assert hover_loop._detect_new_stones(confirmed, frame) == [(1, 10, 10)]
+
+    def test_restores_confirmed_value_not_blank(self, hover_loop):
+        """光标压在已有棋子上时，应沿用确认值而不是抹成空。"""
+        confirmed = np.zeros((19, 19), dtype=int)
+        confirmed[6, 4] = -1
+        frame = np.zeros((19, 19), dtype=int)
+        hover_loop._mask_cursor(frame, confirmed)
+        assert frame[6, 4] == -1
+
+    def test_no_masking_when_cursor_off_board(self, monkeypatch, hover_loop):
+        monkeypatch.setattr(ap, "pyautogui", FakeMouse(5000.0, 5000.0))
+        confirmed = np.zeros((19, 19), dtype=int)
+        frame = confirmed.copy()
+        frame[6, 4] = 1
+        hover_loop._mask_cursor(frame, confirmed)
+        assert frame[6, 4] == 1
 
 
 class TestTurnTracking:

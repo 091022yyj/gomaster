@@ -1,6 +1,6 @@
 """
 对局记录：自动保存（JSON）、战绩统计、SGF 导出。
-保存位置：exe/项目目录下 go_master_data/games.json
+保存位置：项目目录（源码运行）或用户数据目录（打包运行）下 go_master_data/games.json
 """
 from __future__ import annotations
 
@@ -10,10 +10,12 @@ import sys
 import time
 from typing import List, Optional
 
+from .config import frozen_base_dir
+
 
 def data_dir() -> str:
     if getattr(sys, "frozen", False):
-        base = os.path.dirname(sys.executable)
+        base = frozen_base_dir()
     else:
         base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     d = os.path.join(base, "go_master_data")

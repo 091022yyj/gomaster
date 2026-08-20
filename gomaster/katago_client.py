@@ -11,8 +11,18 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 
+_INFO_BLOCK = re.compile(r"\binfo\s+")
+_INFO_FIELDS = re.compile(
+    r"move\s+(\w+).*?visits\s+(\d+).*?winrate\s+([\d.]+).*?scoreLead\s+([-\d.]+)")
+_INFO_PV = re.compile(r"\bpv\s+(.*)")
+
+
 def parse_info_lines(lines: List[str], max_candidates: int = 5) -> List[Dict]:
     """解析 kata-analyze 输出的 info 行，按 move 去重取最新快照，按胜率排序。
+
+    KataGo 把一次刷新的全部候选拼在同一行（实测 20 个候选 / 4849 字符），
+    所以必须先按 info 切块再逐块取字段：否则 pv 会一路贪婪吃到行尾，
+    把后续候选连同 "info move ..." 一起吞进变化图，每行只剩一个候选。
 
     每个候选含：move / visits / winrate / scoreLead / pv（变化图，可能为空）。
     """
@@ -20,17 +30,17 @@ def parse_info_lines(lines: List[str], max_candidates: int = 5) -> List[Dict]:
     for line in lines:
         if not line.startswith("info"):
             continue
-        for m in re.finditer(
-            r"move\s+(\w+)\s+.*?visits\s+(\d+)\s+.*?winrate\s+([\d.]+)\s+.*?scoreLead\s+([-\d.]+)"
-            r"(?:\s+.*?pv\s+(.*))?$",
-            line,
-        ):
-            move, visits, wr, sl = (m.group(1), int(m.group(2)),
-                                    float(m.group(3)), float(m.group(4)))
-            pv = (m.group(5) or "").strip().split()[:12]  # 前 12 手变化图
-            if move not in seen or visits > seen[move]["visits"]:
-                seen[move] = {"move": move, "visits": visits,
-                              "winrate": wr, "scoreLead": sl, "pv": pv}
+        for block in _INFO_BLOCK.split(line)[1:]:
+            m = _INFO_FIELDS.search(block)
+            if not m:
+                continue
+            move, visits = m.group(1), int(m.group(2))
+            if move in seen and visits <= seen[move]["visits"]:
+                continue
+            pv = _INFO_PV.search(block)
+            seen[move] = {"move": move, "visits": visits,
+                          "winrate": float(m.group(3)), "scoreLead": float(m.group(4)),
+                          "pv": pv.group(1).split()[:12] if pv else []}
     cands = sorted(seen.values(), key=lambda c: -c["winrate"])
     return cands[:max_candidates]
 

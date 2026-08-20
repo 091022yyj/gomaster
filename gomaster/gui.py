@@ -14,11 +14,12 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from .board_recognition import BoardModel, find_board_auto, recognize_stones, state_to_string, _order_corners
-from .capture import grab_screen
+from .capture import PRIMARY, Monitor, grab_screen, list_monitors
 from .config import Config
 from .history import export_sgf, list_games, save_game, stats
 from .manual_mode import ManualMode
 from .main_loop import GoMasterLoop
+from .overlay import BoardOverlay
 from .panel import AnalysisPanel
 
 MAX_PREVIEW_W = 480
@@ -40,10 +41,20 @@ class GomasterGUI:
         self.my_color: Optional[str] = None
 
         root.title("GoMaster - AI 围棋助手（手动 / 全自动）")
-        root.geometry("1180x700")
 
         self._build_ui()
+        self._fit_window()
         self._refresh_preview()
+
+    def _fit_window(self) -> None:
+        """按内容实际需要开窗，并压进屏幕可视范围。
+
+        Tk 在 macOS 上行高比 Windows 大，写死 1180x700 会把底部控制栏顶出屏幕外。
+        """
+        self.root.update_idletasks()
+        w = min(max(self.root.winfo_reqwidth(), 1180), self.root.winfo_screenwidth() - 40)
+        h = min(self.root.winfo_reqheight(), self.root.winfo_screenheight() - 120)
+        self.root.geometry(f"{w}x{h}+40+40")
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -90,6 +101,28 @@ class GomasterGUI:
         self.var_sound = tk.BooleanVar(value=self.cfg.sound)
         ttk.Checkbutton(row, text="提示音", variable=self.var_sound).pack(side="left", padx=8)
 
+        row = ttk.Frame(top)
+        row.pack(fill="x", pady=2)
+        ttk.Label(row, text="识别屏幕:").pack(side="left")
+        self._monitors = list_monitors()
+        self.var_monitor = tk.StringVar()
+        combo = ttk.Combobox(row, textvariable=self.var_monitor, width=34, state="readonly",
+                             values=[m.label() for m in self._monitors])
+        combo.pack(side="left", padx=4)
+        combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_preview())
+        for i, m in enumerate(self._monitors):
+            if m.index == self.cfg.monitor:
+                combo.current(i)
+                break
+        else:
+            if self._monitors:
+                combo.current(0)
+        ttk.Label(row, text="（对局窗口放哪块屏就选哪块）").pack(side="left")
+
+        # 底部控制栏先 pack 并锚到底：空间不够时被压缩的应是预览区而非按钮
+        bottom = ttk.Frame(self.root, padding=8)
+        bottom.pack(side="bottom", fill="x")
+
         # 主区域：预览 + 分析面板
         mid = ttk.Frame(self.root, padding=8)
         mid.pack(fill="both", expand=True)
@@ -106,8 +139,6 @@ class GomasterGUI:
         self.panel = AnalysisPanel(right)
 
         # 底部：日志 + 控制
-        bottom = ttk.Frame(self.root, padding=8)
-        bottom.pack(fill="x")
         self.log = tk.Text(bottom, height=7, state="disabled")
         self.log.pack(fill="x")
 
@@ -153,7 +184,15 @@ class GomasterGUI:
             pass
         self.cfg.overlay_coords = self.var_coords.get()
         self.cfg.sound = self.var_sound.get()
+        self.cfg.monitor = self._selected_monitor().index
         return self.cfg
+
+    def _selected_monitor(self) -> Monitor:
+        label = self.var_monitor.get()
+        for m in self._monitors:
+            if m.label() == label:
+                return m
+        return self._monitors[0] if self._monitors else Monitor(PRIMARY, 0, 0, 0, 0)
 
     def _save_config(self) -> None:
         self._read_cfg().save()
@@ -161,7 +200,7 @@ class GomasterGUI:
 
     # ------------------------------------------------------------------
     def _refresh_preview(self) -> None:
-        img = grab_screen()
+        img = grab_screen(self._selected_monitor().index)
         if img is None:
             self._log("截图失败：请确认已安装 mss（pip install mss）且非无头环境")
             return
@@ -206,7 +245,7 @@ class GomasterGUI:
         if self.preview_img is None:
             self._refresh_preview()
             return
-        board = find_board_auto(self.preview_img)
+        board = find_board_auto(self.preview_img, size=self.cfg.board_size)
         if board is None:
             self._log("自动检测失败：请手动点击 4 个角校准")
             return
@@ -229,6 +268,34 @@ class GomasterGUI:
         self._log("棋盘校准完成 ✓")
 
     # ------------------------------------------------------------------
+    def _make_overlay(self, board, x: int, y: int, w: int, h: int):
+        """在主线程创建悬浮窗并回传（macOS 下子线程建 Tk 会直接 abort 进程）。"""
+        def build():
+            return BoardOverlay(board, x, y, w, h,
+                                show_coords=self.cfg.overlay_coords, master=self.root)
+
+        # 已在主线程就直接建：此时 after() 排的队要等本函数返回才轮到，等待必然超时
+        if threading.current_thread() is threading.main_thread():
+            return build()
+
+        box: dict = {}
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                box["ov"] = build()
+            except Exception as e:
+                box["err"] = e
+            finally:
+                done.set()
+
+        self.root.after(0, run)
+        if not done.wait(timeout=5):
+            raise RuntimeError("主线程未响应，悬浮窗创建超时")
+        if "err" in box:
+            raise box["err"]
+        return box["ov"]
+
     def _ensure_manual(self) -> ManualMode:
         if self.manual is None:
             self.manual = ManualMode(
@@ -236,7 +303,7 @@ class GomasterGUI:
                 on_status=self._log,
                 on_analysis=self._on_analysis,
                 on_state=self._on_state,
-                screenshot_fn=grab_screen,
+                overlay_factory=self._make_overlay,
             )
         return self.manual
 
@@ -246,7 +313,6 @@ class GomasterGUI:
                 self._read_cfg(),
                 on_status=self._log,
                 on_state=self._on_state,
-                screenshot_fn=grab_screen,
             )
         return self.loop
 

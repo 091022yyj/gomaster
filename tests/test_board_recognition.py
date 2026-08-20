@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from gomaster.board_recognition import (  # noqa: E402
     BoardModel,
+    _evenly_spaced,
+    _trim_edge_artifacts,
     find_board_auto,
     recognize_stones,
     render_synthetic_board,
@@ -52,6 +54,55 @@ class TestFindBoardAuto:
         # 角点应接近合成棋盘外框（margin=25, 尺寸 25+18*30+25=590）
         tl = board.corners[0]
         assert abs(tl[0] - 25) < 8 and abs(tl[1] - 25) < 8
+
+    def test_corners_are_grid_not_wood_frame(self):
+        """角点必须是最外圈线的交点：取成木框会让每点系统性偏移，边路整列错位。"""
+        board = find_board_auto(render_synthetic_board(19, [], cell=30, margin=40))
+        assert board is not None
+        (x0, y0), _, (x1, y1), _ = board.corners
+        assert abs(x0 - 40) <= 2 and abs(y0 - 40) <= 2
+        assert abs(x1 - (40 + 18 * 30)) <= 2 and abs(y1 - (40 + 18 * 30)) <= 2
+        assert board.cell_size() == pytest.approx(30.0, abs=0.5)
+
+    @pytest.mark.parametrize("size", [9, 13, 19])
+    def test_detects_board_size(self, size):
+        board = find_board_auto(render_synthetic_board(size, [], cell=30, margin=40))
+        assert board is not None and board.size == size
+
+    def test_rejects_size_mismatch(self):
+        """13 路残局不该被当成 19 路盘。"""
+        img = render_synthetic_board(13, [], cell=30, margin=40)
+        assert find_board_auto(img, size=13) is not None
+        assert find_board_auto(img, size=19) is None
+
+    def test_none_when_no_board(self):
+        assert find_board_auto(np.full((400, 400, 3), 255, dtype=np.uint8)) is None
+
+    def test_stones_do_not_break_detection(self):
+        stones = [(1, x, y) for x in range(3, 9) for y in range(3, 9)]
+        board = find_board_auto(render_synthetic_board(19, stones, cell=30, margin=40))
+        assert board is not None and board.size == 19
+
+
+class TestTrimEdgeArtifacts:
+    """棋盘区域自身的边框会在投影上形成一条假网格线（实测 19 路数出 20 条）。"""
+
+    def test_drops_leading_frame_line(self):
+        # 取自真实截图：第 0 条是区域边框，真正首线在 53
+        positions = [0, 53, 89, 124, 160, 195, 231, 266, 302]
+        assert _trim_edge_artifacts(positions)[0] == 53
+
+    def test_drops_trailing_frame_line(self):
+        positions = [10, 45, 80, 115, 150, 240]
+        assert _trim_edge_artifacts(positions)[-1] == 150
+
+    def test_keeps_clean_lattice(self):
+        positions = [10, 40, 70, 100, 130]
+        assert _trim_edge_artifacts(positions) == positions
+
+    def test_evenly_spaced_rejects_irregular(self):
+        assert _evenly_spaced([0, 30, 60, 90]) is True
+        assert _evenly_spaced([0, 5, 60, 90]) is False
 
 
 class TestRecognizeStones:

@@ -1,7 +1,10 @@
 """
 GBR - Go Board Recognition
-棋盘识别：自动检测棋盘外框（Canny 边缘 + 轮廓四边形）+ 霍夫圆检测棋子 +
-交叉点归一到 19 路网格 → 输出局面数组（1=黑 -1=白 0=空）与 GTP 坐标转换。
+棋盘识别：先定位棋盘所在区域（HSV 木色 / Canny 边缘找四边形），再在区域内
+按暗像素投影找出真实网格线 → 输出局面数组（1=黑 -1=白 0=空）与 GTP 坐标转换。
+
+角点取的是**最外圈网格线的交点**而不是木质边框：两者相差约一格，
+直接拿木框当网格会让每个交叉点系统性偏移，边路棋子整列错位、自动落子点错格。
 
 设计目标：平台无关（腾讯围棋/野狐围棋通用），支持自动检测与手动校准两种方式。
 """
@@ -14,6 +17,7 @@ import cv2
 import numpy as np
 
 GTP_COLS = "abcdefghjklmnopqrstuvwxyz"  # 跳过 i
+BOARD_SIZES = (9, 13, 19)
 
 
 @dataclass
@@ -88,59 +92,142 @@ class BoardModel:
 
 
 # ---------------------------------------------------------------------------
-# 自动检测棋盘外框：轮廓找最大四边形
+# 自动检测：先定位棋盘区域，再在区域内找真实网格线
 # ---------------------------------------------------------------------------
-def find_board_auto(image: np.ndarray) -> Optional[BoardModel]:
-    """自动检测棋盘外框。
+GRID_DARK_MARGIN = 25   # 比区域均值暗多少才算网格线像素
+GRID_PEAK_RATIO = 0.5   # 投影超过峰值这个比例才算一条线（滤掉坐标标号等短笔画）
+GRID_SPACING_TOL = 0.15 # 线间距的相对标准差上限，超了说明认错了
+GRID_GAP_TOL = 0.2      # 首尾间距偏离中位数超过这个比例，判为区域边框而非网格线
 
-    优先用 HSV 木色过滤定位（参考实现思路，抗干扰强）；
-    失败则回退 Canny 边缘 + 最大四边形轮廓。
+
+def _largest_quad(binary: np.ndarray, min_area: float) -> Optional[np.ndarray]:
+    """在二值图里找面积最大的凸四边形轮廓。"""
+    contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    best, best_area = None, min_area
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < best_area:
+            continue
+        approx = cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)
+        if len(approx) != 4 or not cv2.isContourConvex(approx):
+            continue
+        best, best_area = approx.reshape(4, 2).astype(float), area
+    return best
+
+
+def find_board_region(image: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    """定位棋盘所在矩形区域 (x0, y0, x1, y1)。
+
+    优先用 HSV 木色过滤（抗干扰强），失败再退到 Canny 边缘找最大四边形。
+    这一步只求把棋盘框住，精度由后面的网格线检测负责。
     """
     bgr = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-    # 方法一：HSV 木色过滤 → 最大轮廓 → 四边形
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, np.array([10, 0, 0]), np.array([40, 255, 255]))
-    mask = cv2.erode(mask, None, iterations=2)
-    mask = cv2.dilate(mask, None, iterations=2)
-    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     img_h, img_w = bgr.shape[:2]
     min_area = img_w * img_h * 0.05
-    best: Optional[BoardModel] = None
-    best_area = 0.0
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < min_area:
-            continue
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        if len(approx) != 4 or not cv2.isContourConvex(approx):
-            continue
-        if area > best_area:
-            best_area = area
-            best = BoardModel(size=19, corners=_order_corners(approx.reshape(4, 2).astype(float)))
-    if best is not None:
-        return best
-    # 方法二：Canny 边缘 + 最大四边形轮廓
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blur, 50, 150)
-    kernel = np.ones((5, 5), np.uint8)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    best = None
-    best_area = 0.0
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < min_area:
-            continue
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        if len(approx) != 4 or not cv2.isContourConvex(approx):
-            continue
-        if area > best_area:
-            best_area = area
-            best = BoardModel(size=19, corners=_order_corners(approx.reshape(4, 2).astype(float)))
-    return best
+
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, np.array([10, 0, 0]), np.array([40, 255, 255]))
+    mask = cv2.dilate(cv2.erode(mask, None, iterations=2), None, iterations=2)
+    quad = _largest_quad(mask, min_area)
+
+    if quad is None:
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        quad = _largest_quad(edges, min_area)
+    if quad is None:
+        return None
+
+    x0, y0 = quad.min(axis=0)
+    x1, y1 = quad.max(axis=0)
+    return int(max(0, x0)), int(max(0, y0)), int(min(img_w, x1)), int(min(img_h, y1))
+
+
+def _line_positions(projection: np.ndarray) -> List[int]:
+    """暗像素投影曲线 → 各条网格线的中心位置。
+
+    阈值取峰值的一半：网格线贯穿整个区域，投影值远高于坐标标号、
+    棋子等局部暗块，因此能被这一刀干净分开。
+    """
+    peak = float(projection.max())
+    if peak <= 0:
+        return []
+    threshold = peak * GRID_PEAK_RATIO
+    positions, start = [], None
+    for i, value in enumerate(projection):
+        if value > threshold and start is None:
+            start = i
+        elif value <= threshold and start is not None:
+            positions.append((start + i) // 2)
+            start = None
+    if start is not None:
+        positions.append((start + len(projection)) // 2)
+    return positions
+
+
+def _trim_edge_artifacts(positions: List[int]) -> List[int]:
+    """削掉首尾不合格律的假线。
+
+    棋盘区域是按木色/边缘框出来的，它自己的边框在投影上同样是一条贯穿的峰，
+    会被当成第 0 条网格线（实测 19 路盘因此数出 20 条）。真正的网格线等距，
+    据此把首尾间距明显偏离中位数的那条剔除。
+    """
+    while len(positions) >= 4:
+        gaps = np.diff(positions)
+        median = float(np.median(gaps))
+        if median <= 0:
+            break
+        if abs(gaps[0] - median) > median * GRID_GAP_TOL:
+            positions = positions[1:]
+        elif abs(gaps[-1] - median) > median * GRID_GAP_TOL:
+            positions = positions[:-1]
+        else:
+            break
+    return positions
+
+
+def _evenly_spaced(positions: List[int]) -> bool:
+    """线间距是否足够均匀——不均匀说明把标号或棋子边缘认成了线。"""
+    if len(positions) < 2:
+        return False
+    gaps = np.diff(positions)
+    return bool(gaps.mean() > 0 and gaps.std() / gaps.mean() <= GRID_SPACING_TOL)
+
+
+def detect_grid_lines(gray: np.ndarray) -> Tuple[List[int], List[int]]:
+    """区域灰度图 → (竖线 x 坐标, 横线 y 坐标)。"""
+    dark = (gray < gray.mean() - GRID_DARK_MARGIN).astype(np.uint8)
+    return (_trim_edge_artifacts(_line_positions(dark.sum(axis=0))),
+            _trim_edge_artifacts(_line_positions(dark.sum(axis=1))))
+
+
+def find_board_auto(image: np.ndarray, size: Optional[int] = None) -> Optional[BoardModel]:
+    """自动检测棋盘，角点取最外圈网格线的交点。
+
+    size 给定时要求实际路数与之相符，避免 13 路残局被当成 19 路盘。
+    检测不到可靠网格时返回 None——宁可让用户手动校准，也不能拿偏掉的
+    网格继续跑：那会让整盘识别与落子都错位，且不会有任何报错。
+    """
+    region = find_board_region(image)
+    if region is None:
+        return None
+    x0, y0, x1, y1 = region
+    bgr = image if image.ndim == 3 else cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    gray = cv2.cvtColor(bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+
+    xs, ys = detect_grid_lines(gray)
+    detected = len(xs)
+    if detected != len(ys) or detected not in BOARD_SIZES:
+        return None
+    if size is not None and detected != size:
+        return None
+    if not (_evenly_spaced(xs) and _evenly_spaced(ys)):
+        return None
+
+    left, right = x0 + xs[0], x0 + xs[-1]
+    top, bottom = y0 + ys[0], y0 + ys[-1]
+    return BoardModel(size=detected, corners=[(left, top), (right, top),
+                                              (right, bottom), (left, bottom)])
 
 
 def _order_corners(pts: np.ndarray) -> List[Tuple[float, float]]:

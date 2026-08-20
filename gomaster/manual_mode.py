@@ -13,6 +13,8 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 from .board_recognition import BoardModel, find_board_auto, recognize_stones
+from .autoplayer import cursor_board_point
+from .capture import grab_screen, resolve_geometry
 from .config import Config
 from .katago_client import KataGoClient
 from .overlay import BoardOverlay
@@ -47,6 +49,7 @@ class ManualMode:
         self.my_color: Optional[str] = None
         # 识别抖动保护：同一位置只记录一次
         self._last_synced: set = set()
+        self._origin, self._scale = (0, 0), 1.0
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -67,6 +70,11 @@ class ManualMode:
             self.engine.close()
             self.engine = None
 
+    def _grab(self) -> Optional[np.ndarray]:
+        if self.screenshot_fn is not None:
+            return self.screenshot_fn()
+        return grab_screen(self.config.monitor)
+
     def set_board(self, board: BoardModel, state: Optional[np.ndarray] = None) -> None:
         self.board = board
         if state is not None:
@@ -86,20 +94,21 @@ class ManualMode:
             self.on_status(f"引擎启动失败: {e}")
             return
 
+        self._origin, self._scale = resolve_geometry(self.config.monitor)
+
         # 校准
         self.on_status("等待棋盘校准（自动检测或手动拖角）...")
         calib_wait = time.time() + 30
         while not self._stop.is_set():
             if self.board is not None:
                 break
-            if self.screenshot_fn:
-                img = self.screenshot_fn()
-                if img is not None:
-                    b = find_board_auto(img)
-                    if b is not None:
-                        self.board = b
-                        self.on_status("自动检测到棋盘 ✓")
-                        break
+            img = self._grab()
+            if img is not None:
+                b = find_board_auto(img, size=self.config.board_size)
+                if b is not None:
+                    self.board = b
+                    self.on_status("自动检测到棋盘 ✓")
+                    break
             if time.time() > calib_wait:
                 self.on_status("未检测到棋盘：请在界面手动校准四个角")
                 break
@@ -117,11 +126,12 @@ class ManualMode:
                 if self.board is None:
                     time.sleep(0.5)
                     continue
-                img = self.screenshot_fn() if self.screenshot_fn else None
+                img = self._grab()
                 if img is None:
                     time.sleep(0.3)
                     continue
                 state = recognize_stones(img, self.board)
+                self._mask_cursor(state, last_state)
                 self.state = state
                 self.on_state(state)
 
@@ -185,12 +195,25 @@ class ManualMode:
             w, h = max(100, x1 - x0), max(100, y1 - y0)
             if self._overlay_factory:
                 self.overlay = self._overlay_factory(self.board, x0, y0, w, h)
-            else:
-                from .overlay import BoardOverlay
+            elif threading.current_thread() is threading.main_thread():
                 self.overlay = BoardOverlay(self.board, x0, y0, w, h,
                                             show_coords=self.config.overlay_coords)
+            else:
+                self.on_status("悬浮窗只能在主线程创建，已跳过（请从图形界面启动）")
         except Exception as e:
             self.on_status(f"悬浮窗创建失败: {e}")
+
+    def _mask_cursor(self, state: np.ndarray, confirmed: np.ndarray) -> None:
+        """抹掉光标压住那一点：平台在光标下画的"待落子"指示块会被识别成真子。
+
+        玩家自己落子后光标仍停在该点，这一手要等光标移开才会被记录 —— 可自愈，
+        而误把指示块当成落子会把假棋同步进引擎，不可逆。
+        """
+        pt = cursor_board_point(self.board, self._origin, self._scale)
+        if pt is None:
+            return
+        x, y = pt
+        state[y, x] = confirmed[y, x]
 
     @staticmethod
     def _detect_new_stones(prev: np.ndarray, cur: np.ndarray) -> List[Tuple[int, int, int]]:

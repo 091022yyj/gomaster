@@ -1,9 +1,11 @@
-# GoMaster 依赖（Windows 打包用）
+# GoMaster 依赖
 numpy
 opencv-python
 mss
 Pillow
 pyautogui
+# macOS：悬浮窗点击穿透要用 AppKit（pyautogui 会间接带上，显式声明避免被裁剪）
+pyobjc-framework-Cocoa; sys_platform == "darwin"
 # 可选：更准的"轮到谁"文字识别（体积大，不装也能用轮次跟踪）
 # paddleocr
 # paddlepaddle

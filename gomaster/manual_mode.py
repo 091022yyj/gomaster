@@ -12,7 +12,7 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
-from .board_recognition import BoardModel, find_board_auto, recognize_stones
+from .board_recognition import BoardModel, FrameGate, find_board_auto, recognize_stones
 from .autoplayer import cursor_board_point
 from .capture import grab_screen, resolve_geometry
 from .config import Config
@@ -49,6 +49,7 @@ class ManualMode:
         self.my_color: Optional[str] = None
         # 识别抖动保护：同一位置只记录一次
         self._last_synced: set = set()
+        self._gate = FrameGate()
         self._origin, self._scale = (0, 0), 1.0
 
     # ------------------------------------------------------------------
@@ -69,6 +70,10 @@ class ManualMode:
         if self.engine:
             self.engine.close()
             self.engine = None
+        # 下次 start() 会开一个空盘的新引擎，旧对局的去重记录必须一并作废，
+        # 否则第二局重复出现的坐标会被当成已同步而永远不进引擎
+        self._last_synced.clear()
+        self._gate.reset()
 
     def _grab(self) -> Optional[np.ndarray]:
         if self.screenshot_fn is not None:
@@ -138,20 +143,21 @@ class ManualMode:
                 self.on_state(state)
 
                 diff = self._detect_new_stones(last_state, state)
-                if diff:
-                    # 新棋子 → 同步引擎 + 记录对局（去重）
-                    for color, x, y in diff:
-                        gtp = self.board.to_gtp(x, y)
-                        key = (color, x, y)
-                        if key not in self._last_synced:
-                            self._last_synced.add(key)
-                            try:
-                                self.engine.play("B" if color == 1 else "W", gtp)
-                            except Exception as e:
-                                self.on_status(f"引擎同步失败: {e}")
-                            self.game_moves.append((color, x, y, gtp))
-                            self.on_status(f"落子 {gtp}")
-                    last_state = state.copy()
+                accepted, reason = self._gate.accept(diff, state)
+                if reason:
+                    self.on_status(f"识别异常：{reason}，已丢弃该帧")
+                for color, x, y in accepted:
+                    gtp = self.board.to_gtp(x, y)
+                    key = (color, x, y)
+                    if key not in self._last_synced:
+                        self._last_synced.add(key)
+                        try:
+                            self.engine.play("B" if color == 1 else "W", gtp)
+                        except Exception as e:
+                            self.on_status(f"引擎同步失败: {e}")
+                        self.game_moves.append((color, x, y, gtp))
+                        self.on_status(f"落子 {gtp}")
+                    last_state[y, x] = color  # 只推进已采信的点，待确认的下帧继续观察
 
                 # 持续分析（节流：至少间隔 1.5 秒，避免刷屏/引擎过载）
                 now = time.time()
@@ -202,6 +208,9 @@ class ManualMode:
                                             show_coords=self.config.overlay_coords)
             else:
                 self.on_status("悬浮窗只能在主线程创建，已跳过（请从图形界面启动）")
+            if self.overlay is not None and self.overlay.window_number is None:
+                # 拿不到窗口号就无法把悬浮窗排除在截图之外，识别会看到自己画的标记
+                self.on_status("悬浮窗未能置顶，截图会含悬浮窗，标记可能被误认成棋子")
         except Exception as e:
             self.on_status(f"悬浮窗创建失败: {e}")
 

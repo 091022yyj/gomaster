@@ -14,7 +14,7 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
-from .board_recognition import BoardModel, recognize_stones, find_board_auto
+from .board_recognition import BoardModel, FrameGate, recognize_stones, find_board_auto
 from .capture import grab_screen, resolve_geometry
 from .config import Config
 from .katago_client import KataGoClient
@@ -43,6 +43,7 @@ class GoMasterLoop:
         self.moves_synced = 0
         self._awaiting = False  # AI 已建议/落子，等待对手落子后才能再次分析
         self._last_click_point: Optional[Tuple[int, int]] = None  # AI 刚点下的点（不做光标屏蔽）
+        self._gate = FrameGate()
         # 对局记录（供面板/复盘/保存）
         self.game_moves: List[Tuple[int, int, int, str]] = []
         self.move_no = 0
@@ -63,6 +64,7 @@ class GoMasterLoop:
         if self.engine:
             self.engine.close()
             self.engine = None
+        self._gate.reset()
 
     def _grab(self) -> Optional[np.ndarray]:
         if self.screenshot_fn is not None:
@@ -141,7 +143,10 @@ class GoMasterLoop:
                 self.on_state(state)
 
                 # 与上次对比：新出现的棋子 = 对手落子
-                diff = self._detect_new_stones(last_state, state)
+                raw_diff = self._detect_new_stones(last_state, state)
+                diff, reason = self._gate.accept(raw_diff, state)
+                if reason:
+                    self.on_status(f"识别异常：{reason}，已丢弃该帧")
                 if diff:
                     # 解析我方颜色（首次）
                     if self.my_color is None:
@@ -164,7 +169,8 @@ class GoMasterLoop:
                         if color != my_player:  # 对手落子计数（AI 落子由 _maybe_play 记录）
                             self.move_no += 1
                             self.game_moves.append((color, x, y, gtp))
-                    last_state = state.copy()
+                    for color, x, y in diff:
+                        last_state[y, x] = color  # 只推进已采信的点
                     # 仅对手落子解除等待并触发分析；AI 自己落下的子保持等待
                     if self._is_opponent_move(diff):
                         self._awaiting = False

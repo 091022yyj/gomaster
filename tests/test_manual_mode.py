@@ -38,6 +38,8 @@ class FakeEngine:
 
 
 class FakeOverlay:
+    window_number = None
+
     def __init__(self, *a, **kw):
         self.updates = []
 

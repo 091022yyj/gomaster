@@ -1,0 +1,16 @@
+{
+  "katago_path": "/opt/homebrew/bin/katago",
+  "model_path": "/Users/wangjiawei/katago/networks/kata1-zhizi-b40c768nbt-s11472M-d5982M.bin.gz",
+  "config_path": "/Users/wangjiawei/katago/configs/gtp_metal.cfg",
+  "board_size": 19,
+  "num_search_threads": 16,
+  "think_seconds": 5.0,
+  "my_color": "auto",
+  "interval": 1.0,
+  "click_delay": 0.4,
+  "monitor": 1,
+  "auto_click": false,
+  "verify_moves": true,
+  "overlay_coords": true,
+  "sound": true
+}

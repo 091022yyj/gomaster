@@ -66,22 +66,23 @@ class BoardOverlay:
         self._origin = (x, y)
         self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self.root.overrideredirect(True)                 # 无边框
-        self.root.attributes("-topmost", always_on_top)  # 置顶
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         bg = self._apply_transparency()
         self.canvas = tk.Canvas(self.root, width=w, height=h,
                                 highlightthickness=0, bg=bg)
         self.canvas.pack(fill="both", expand=True)
         self.root.update_idletasks()
-        # 鼠标穿透：悬浮窗不拦截点击（玩家在游戏窗口落子）
-        self._enable_click_through(w, h)
+        # 置顶必须在窗口映射之后：map 之前设 -topmost，macOS 上 NSWindow.level
+        # 会停在 0（实测 map 前设=0 / map 后设=19），窗口根本没抬起来
+        self.root.attributes("-topmost", always_on_top)
+        self.root.update_idletasks()
+        self.window_number = self._setup_native(w, h)
         # 当前数据
         self._cands: List[dict] = []
         self._recommend: Optional[Tuple[int, int]] = None  # (x, y)
         self._flash = True
         self._flash_job = None
         self._closed = False
-        self.window_number: Optional[int] = self._find_window_number(w, h)
         self._start_flash()
         self._redraw()
 
@@ -106,29 +107,14 @@ class BoardOverlay:
             pass
         return TRANSPARENT_KEY
 
-    def _find_ns_window(self, w: int, h: int):
-        """按尺寸认出自己这个 Toplevel 对应的 NSWindow（macOS）。"""
-        from AppKit import NSApp
+    def _setup_native(self, w: int, h: int) -> Optional[int]:
+        """macOS 原生窗口设置：点击穿透 + 返回窗口号（供截图排除自身）。
 
-        for win in NSApp().windows():
-            frame = win.frame()
-            if (win.isVisible() and abs(frame.size.width - w) < 2
-                    and abs(frame.size.height - h) < 2):
-                return win
-        return None
-
-    def _find_window_number(self, w: int, h: int) -> Optional[int]:
-        """自己的窗口号，供截图时排除本窗口（见 capture._grab_below_window）。"""
-        if sys.platform != "darwin":
-            return None
-        try:
-            win = self._find_ns_window(w, h)
-            return int(win.windowNumber()) if win is not None else None
-        except Exception:
-            return None
-
-    def _enable_click_through(self, w: int, h: int) -> None:
-        """让鼠标点击穿透悬浮窗落到游戏窗口；失败时悬浮窗会挡鼠标，可手动挪开。"""
+        窗口号只在**确认已置顶**时才返回。截图用的
+        kCGWindowListOptionOnScreenBelowWindow 会连同该窗口上方的一切一起排除，
+        若悬浮窗没抬起来，用户点一下对局窗口就会把游戏本身排出画面，
+        识别到的将是桌面壁纸——比悬浮窗入镜严重得多。
+        """
         if sys.platform == "win32":
             try:
                 import ctypes
@@ -143,13 +129,21 @@ class BoardOverlay:
                     top, GWL_EXSTYLE, ex | WS_EX_LAYERED | WS_EX_TRANSPARENT)
             except Exception:
                 pass
-        elif sys.platform == "darwin":
-            try:
-                win = self._find_ns_window(w, h)
-                if win is not None:
+            return None
+        if sys.platform != "darwin":
+            return None
+        try:
+            from AppKit import NSApp
+
+            for win in NSApp().windows():
+                frame = win.frame()
+                if (win.isVisible() and abs(frame.size.width - w) < 2
+                        and abs(frame.size.height - h) < 2):
                     win.setIgnoresMouseEvents_(True)
-            except Exception:
-                pass
+                    return int(win.windowNumber()) if win.level() > 0 else None
+        except Exception:
+            pass
+        return None
 
     def _post(self, fn) -> None:
         """把 Tk 操作放到主线程执行（macOS 下跨线程操作 Tk 会 abort 进程）。"""

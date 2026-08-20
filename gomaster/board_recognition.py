@@ -11,13 +11,19 @@ GBR - Go Board Recognition
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 GTP_COLS = "abcdefghjklmnopqrstuvwxyz"  # 跳过 i
 BOARD_SIZES = (9, 13, 19)
+
+# 真实对局两帧之间最多多出两颗子（我方一手 + 对方一手）。一帧冒出十几颗必然是
+# 识别故障——窗口被遮挡、截到壁纸、悬浮窗入镜。引擎棋盘一旦被污染没有回滚入口，
+# 因此宁可整帧丢弃。
+MAX_NEW_STONES_PER_FRAME = 2
+MAX_COLOR_IMBALANCE = 9   # 让子局最多 9 子；超过说明整片被判成了同色
 
 
 @dataclass
@@ -272,8 +278,10 @@ def recognize_stones(image: np.ndarray, board: BoardModel) -> np.ndarray:
     bg = float(np.median(warped))
     dark_th_val = bg - 60
     light_th_val = bg + 20
-    dark_th = 0.30   # 窗口内暗像素占比超过此值 = 黑子
-    light_th = 0.25  # 亮像素占比超过此值 = 白子
+    # 阈值按实测分离度取：真实棋子占比 黑 0.998 / 白 0.59，空点两者皆 0.00，
+    # 中间留足余量。原来白子只要 0.25 就判定，比黑子松三倍，浅色背景整片过线。
+    dark_th = 0.30
+    light_th = 0.40
 
     for y in range(board.size):
         for x in range(board.size):
@@ -293,6 +301,71 @@ def recognize_stones(image: np.ndarray, board: BoardModel) -> np.ndarray:
             elif light > light_th:
                 state[y, x] = -1
     return state
+
+
+def plausible_position(state: np.ndarray) -> bool:
+    """局面看着像不像一盘真棋：黑白子数不该严重失衡。
+
+    截到壁纸或界面时会整片判成同色（实测 229 子里 227 白），据此挡掉。
+    """
+    black = int(np.count_nonzero(state == 1))
+    white = int(np.count_nonzero(state == -1))
+    return abs(black - white) <= MAX_COLOR_IMBALANCE
+
+
+class StoneConfirmer:
+    """新子要连续若干帧稳定出现才认，挡掉闪烁、动画、弹窗一类的瞬时噪声。"""
+
+    def __init__(self, frames: int = 2):
+        self.frames = frames
+        self._pending: Dict[Tuple[int, int, int], int] = {}
+
+    def confirm(self, diff: List[Tuple[int, int, int]]) -> List[Tuple[int, int, int]]:
+        """输入本帧新增子，返回其中已稳定够久、可以采信的那些。"""
+        current = set(diff)
+        for key in list(self._pending):
+            if key not in current:
+                del self._pending[key]        # 一闪就没的，重新计数
+        confirmed = []
+        for key in diff:
+            self._pending[key] = self._pending.get(key, 0) + 1
+            if self._pending[key] >= self.frames:
+                del self._pending[key]
+                confirmed.append(key)
+        return confirmed
+
+    def reset(self) -> None:
+        self._pending.clear()
+
+
+class FrameGate:
+    """决定每帧识别结果里哪些新子可以采信。
+
+    首帧整体对齐（支持中途启动，盘上已有子）；之后要求单帧新增不超过两颗，
+    且连续若干帧稳定出现。引擎棋盘一旦被假棋污染没有任何回滚入口，宁可丢帧。
+    """
+
+    def __init__(self, confirm_frames: int = 2):
+        self._confirmer = StoneConfirmer(confirm_frames)
+        self._aligned = False
+
+    def accept(self, diff: List[Tuple[int, int, int]], state: np.ndarray
+               ) -> Tuple[List[Tuple[int, int, int]], str]:
+        """返回 (可采信的新子, 丢帧原因)；原因非空表示整帧不可信。"""
+        if not self._aligned:
+            self._aligned = True
+            if diff and not plausible_position(state):
+                black = int(np.count_nonzero(state == 1))
+                white = int(np.count_nonzero(state == -1))
+                return [], f"开局识别到黑 {black} 白 {white}，黑白严重失衡，疑似没截到棋盘"
+            return diff, ""
+        if len(diff) > MAX_NEW_STONES_PER_FRAME:
+            return [], f"单帧新增 {len(diff)} 子，真实对局最多 {MAX_NEW_STONES_PER_FRAME} 颗"
+        return self._confirmer.confirm(diff), ""
+
+    def reset(self) -> None:
+        self._confirmer.reset()
+        self._aligned = False
 
 
 def state_to_string(state: np.ndarray) -> str:

@@ -91,6 +91,28 @@ class TestGrabScreen:
         assert capture.grab_screen() is None
 
 
+class TestGrabBelowWindow:
+    """悬浮窗画在棋盘上，整屏截图会把它自己拍进去，圆圈被当成棋子。"""
+
+    def test_uses_below_window_path_on_macos(self, fake_mss, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "darwin")
+        monkeypatch.setattr(capture, "_grab_below_window",
+                            lambda mon, num: np.full((mon.height, mon.width, 3), 7, np.uint8))
+        img = capture.grab_screen(1, below_window=123)
+        assert img[0, 0, 0] == 7
+
+    def test_falls_back_when_quartz_unavailable(self, fake_mss, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "darwin")
+        monkeypatch.setattr(capture, "_grab_below_window", lambda mon, num: None)
+        assert capture.grab_screen(1, below_window=123).shape == (982, 1512, 3)
+
+    def test_ignored_on_other_platforms(self, fake_mss, monkeypatch):
+        monkeypatch.setattr(capture.sys, "platform", "win32")
+        monkeypatch.setattr(capture, "_grab_below_window",
+                            lambda mon, num: pytest.fail("非 macOS 不该走 Quartz"))
+        assert capture.grab_screen(1, below_window=123).shape == (982, 1512, 3)
+
+
 class TestMeasureScale:
     def test_unity_when_screenshot_matches_points(self, fake_mss):
         assert capture.measure_scale(PRIMARY) == 1.0

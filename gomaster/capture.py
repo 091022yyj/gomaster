@@ -5,9 +5,11 @@
 """
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 try:
@@ -50,8 +52,54 @@ def list_monitors() -> List[Monitor]:
         return []
 
 
-def grab_screen(index: int = PRIMARY) -> Optional[np.ndarray]:
-    """截取第 index 块物理屏，返回 BGR 图像（OpenCV 格式）；失败返回 None。"""
+def _cgimage_to_bgr(image) -> np.ndarray:
+    import Quartz as Q
+
+    width, height = Q.CGImageGetWidth(image), Q.CGImageGetHeight(image)
+    stride = Q.CGImageGetBytesPerRow(image)
+    data = Q.CGDataProviderCopyData(Q.CGImageGetDataProvider(image))
+    buf = np.frombuffer(data, dtype=np.uint8)[:stride * height]
+    return buf.reshape(height, stride // 4, 4)[:, :width, :3].copy()  # BGRA → BGR
+
+
+def _grab_below_window(mon: Monitor, window_number: int) -> Optional[np.ndarray]:
+    """只截取指定窗口以下的画面（macOS）。
+
+    悬浮窗就画在棋盘上方，整屏截图会把它自己拍进去，候选点圆圈随即被
+    recognize_stones 当成棋子、当成对手落子同步进引擎，形成
+    "画标记 → 认成子 → 分析变化 → 画新标记" 的反馈回路。
+    """
+    try:
+        import Quartz as Q
+
+        image = Q.CGWindowListCreateImage(
+            Q.CGRectMake(mon.left, mon.top, mon.width, mon.height),
+            Q.kCGWindowListOptionOnScreenBelowWindow, window_number,
+            Q.kCGWindowImageNominalResolution)
+        if image is None:
+            return None
+        bgr = _cgimage_to_bgr(image)
+    except Exception:
+        return None
+    # 统一成逻辑点尺寸：与 mss 口径一致，坐标换算才不用分叉
+    if (bgr.shape[1], bgr.shape[0]) != (mon.width, mon.height):
+        bgr = cv2.resize(bgr, (mon.width, mon.height), interpolation=cv2.INTER_AREA)
+    return bgr
+
+
+def grab_screen(index: int = PRIMARY,
+                below_window: Optional[int] = None) -> Optional[np.ndarray]:
+    """截取第 index 块物理屏，返回 BGR 图像（OpenCV 格式）；失败返回 None。
+
+    below_window 给定时只截该窗口以下的内容，用于把自家悬浮窗排除在识别之外。
+    """
+    if below_window is not None and sys.platform == "darwin":
+        for mon in list_monitors():
+            if mon.index == index:
+                shot = _grab_below_window(mon, below_window)
+                if shot is not None:
+                    return shot
+                break  # Quartz 不可用则退回 mss（会拍到悬浮窗，但好过没有画面）
     if not _HAS_MSS:
         return None
     try:

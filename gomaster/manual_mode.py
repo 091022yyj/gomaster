@@ -73,7 +73,9 @@ class ManualMode:
     def _grab(self) -> Optional[np.ndarray]:
         if self.screenshot_fn is not None:
             return self.screenshot_fn()
-        return grab_screen(self.config.monitor)
+        # 排除自家悬浮窗，否则它画的候选点圆圈会被当成棋子
+        below = self.overlay.window_number if self.overlay else None
+        return grab_screen(self.config.monitor, below_window=below)
 
     def set_board(self, board: BoardModel, state: Optional[np.ndarray] = None) -> None:
         self.board = board

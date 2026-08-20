@@ -39,6 +39,16 @@ def _wr_color(winrate: float) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+def canvas_xy(board, origin: Tuple[int, int], x: int, y: int) -> Tuple[float, float]:
+    """交叉点 → 画布坐标。
+
+    board.point_to_xy 给的是整屏图像坐标，而画布原点在棋盘左上角，必须减掉，
+    否则所有标记整体偏移一个棋盘位置，绝大部分被画布裁掉。
+    """
+    sx, sy = board.point_to_xy(x, y)
+    return sx - origin[0], sy - origin[1]
+
+
 class BoardOverlay:
     """悬浮窗：与原棋盘同位置同尺寸的画布，透明背景只显示标记。"""
 
@@ -52,6 +62,8 @@ class BoardOverlay:
         """
         self.board = board
         self.show_coords = show_coords
+        # 画布原点是棋盘左上角，而 point_to_xy 给的是整屏图像坐标，作图前要减掉
+        self._origin = (x, y)
         self.root = tk.Toplevel(master) if master is not None else tk.Tk()
         self.root.overrideredirect(True)                 # 无边框
         self.root.attributes("-topmost", always_on_top)  # 置顶
@@ -69,6 +81,7 @@ class BoardOverlay:
         self._flash = True
         self._flash_job = None
         self._closed = False
+        self.window_number: Optional[int] = self._find_window_number(w, h)
         self._start_flash()
         self._redraw()
 
@@ -93,6 +106,27 @@ class BoardOverlay:
             pass
         return TRANSPARENT_KEY
 
+    def _find_ns_window(self, w: int, h: int):
+        """按尺寸认出自己这个 Toplevel 对应的 NSWindow（macOS）。"""
+        from AppKit import NSApp
+
+        for win in NSApp().windows():
+            frame = win.frame()
+            if (win.isVisible() and abs(frame.size.width - w) < 2
+                    and abs(frame.size.height - h) < 2):
+                return win
+        return None
+
+    def _find_window_number(self, w: int, h: int) -> Optional[int]:
+        """自己的窗口号，供截图时排除本窗口（见 capture._grab_below_window）。"""
+        if sys.platform != "darwin":
+            return None
+        try:
+            win = self._find_ns_window(w, h)
+            return int(win.windowNumber()) if win is not None else None
+        except Exception:
+            return None
+
     def _enable_click_through(self, w: int, h: int) -> None:
         """让鼠标点击穿透悬浮窗落到游戏窗口；失败时悬浮窗会挡鼠标，可手动挪开。"""
         if sys.platform == "win32":
@@ -111,12 +145,9 @@ class BoardOverlay:
                 pass
         elif sys.platform == "darwin":
             try:
-                from AppKit import NSApp
-                for win in NSApp().windows():
-                    frame = win.frame()
-                    if (win.isVisible() and abs(frame.size.width - w) < 2
-                            and abs(frame.size.height - h) < 2):
-                        win.setIgnoresMouseEvents_(True)
+                win = self._find_ns_window(w, h)
+                if win is not None:
+                    win.setIgnoresMouseEvents_(True)
             except Exception:
                 pass
 
@@ -162,10 +193,10 @@ class BoardOverlay:
             # 坐标标号（外框边缘，小字）
             if self.show_coords and len(self.board.corners) == 4:
                 for i in range(self.board.size):
-                    x, _ = self.board.point_to_xy(i, 0)
+                    x, _ = canvas_xy(self.board, self._origin, i, 0)
                     c.create_text(x, 6, text=self.board.to_gtp(i, 0)[0],
                                   fill="#cccccc", font=("Arial", 7))
-                    _, y = self.board.point_to_xy(0, i)
+                    _, y = canvas_xy(self.board, self._origin, 0, i)
                     c.create_text(6, y, text=str(self.board.size - i),
                                   fill="#cccccc", font=("Arial", 7))
             # 候选点（圆点 + 胜率）
@@ -173,7 +204,7 @@ class BoardOverlay:
                 pt = self.board.from_gtp(cand.get("move", ""))
                 if pt is None:
                     continue
-                sx, sy = self.board.point_to_xy(*pt)
+                sx, sy = canvas_xy(self.board, self._origin, *pt)
                 wr = float(cand.get("winrate", 0.5))
                 r = 9 + int(wr * 14)  # 胜率越高越大
                 c.create_oval(sx - r, sy - r, sx + r, sy + r,
@@ -182,7 +213,7 @@ class BoardOverlay:
                               fill="white", font=("Arial", 8, "bold"))
             # 推荐落点（闪烁圈）
             if self._recommend is not None and self._flash:
-                sx, sy = self.board.point_to_xy(*self._recommend)
+                sx, sy = canvas_xy(self.board, self._origin, *self._recommend)
                 c.create_oval(sx - 16, sy - 16, sx + 16, sy + 16,
                               outline="#00ff88", width=3)
                 c.create_text(sx, sy - 24, text="AI 推荐",

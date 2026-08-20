@@ -42,10 +42,7 @@ def make_logger() -> "tuple":
 
 def run_headless(cfg: Config, on_status) -> None:
     """无界面模式：自动检测棋盘并运行（适合配合已有校准）。"""
-    from gomaster.capture import grab_screen
-
-    loop = GoMasterLoop(cfg, on_status=on_status,
-                        on_state=lambda s: None, screenshot_fn=grab_screen)
+    loop = GoMasterLoop(cfg, on_status=on_status, on_state=lambda s: None)
     on_status("GoMaster 无界面模式启动（Ctrl+C 停止）")
     loop.start()
     try:

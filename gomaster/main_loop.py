@@ -15,9 +15,10 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 from .board_recognition import BoardModel, recognize_stones, find_board_auto
+from .capture import grab_screen, resolve_geometry
 from .config import Config
 from .katago_client import KataGoClient
-from .autoplayer import AutoPlayer
+from .autoplayer import AutoPlayer, cursor_board_point
 
 
 class GoMasterLoop:
@@ -29,7 +30,7 @@ class GoMasterLoop:
         self.on_status = on_status or (lambda s: None)
         self.on_state = on_state or (lambda s: None)
         self.on_analysis = on_analysis or (lambda c, s: None)
-        self.screenshot_fn = screenshot_fn  # 外部注入截图（GUI 用 mss；测试用合成图）
+        self.screenshot_fn = screenshot_fn  # 注入截图（测试用合成图）；缺省抓配置指定的屏
         self.board: Optional[BoardModel] = None
         self.state = np.zeros((config.board_size, config.board_size), dtype=int)
         self.engine: Optional[KataGoClient] = None
@@ -41,6 +42,7 @@ class GoMasterLoop:
         self.last_ai_move: Optional[str] = None
         self.moves_synced = 0
         self._awaiting = False  # AI 已建议/落子，等待对手落子后才能再次分析
+        self._last_click_point: Optional[Tuple[int, int]] = None  # AI 刚点下的点（不做光标屏蔽）
         # 对局记录（供面板/复盘/保存）
         self.game_moves: List[Tuple[int, int, int, str]] = []
         self.move_no = 0
@@ -62,6 +64,28 @@ class GoMasterLoop:
             self.engine.close()
             self.engine = None
 
+    def _grab(self) -> Optional[np.ndarray]:
+        if self.screenshot_fn is not None:
+            return self.screenshot_fn()
+        return grab_screen(self.config.monitor)
+
+    def _configure_player(self) -> None:
+        """把选中屏幕的原点与缩放交给点击器，图像坐标才能换算成全局屏幕坐标。"""
+        self.player.origin, self.player.scale = resolve_geometry(self.config.monitor)
+
+    def _mask_cursor(self, state: np.ndarray, confirmed: np.ndarray) -> None:
+        """抹掉光标压住那一点的识别结果，沿用上一帧的确认值。
+
+        平台在光标下画的"待落子"指示块颜色随执棋方变化，会被识别成真子，
+        进而当作对手落子同步进引擎，引擎棋盘从此永久错位。
+        例外：AI 刚点下的那点是真子，抹掉会导致我方这手同步不进引擎。
+        """
+        pt = cursor_board_point(self.board, self.player.origin, self.player.scale)
+        if pt is None or pt == self._last_click_point:
+            return
+        x, y = pt
+        state[y, x] = confirmed[y, x]
+
     def set_board(self, board: BoardModel, state: Optional[np.ndarray] = None) -> None:
         """手动校准棋盘（GUI 拖拽角点后调用）。"""
         self.board = board
@@ -80,6 +104,7 @@ class GoMasterLoop:
         except Exception as e:
             self.on_status(f"引擎启动失败: {e}")
             return
+        self._configure_player()
 
         # 首次校准：尝试自动检测（或等待手动校准）
         self.on_status("等待棋盘校准（自动检测或手动拖角）...")
@@ -87,14 +112,13 @@ class GoMasterLoop:
         while not self._stop.is_set():
             if self.board is not None:
                 break
-            if self.screenshot_fn:
-                img = self.screenshot_fn()
-                if img is not None:
-                    b = find_board_auto(img)
-                    if b is not None:
-                        self.board = b
-                        self.on_status("自动检测到棋盘 ✓")
-                        break
+            img = self._grab()
+            if img is not None:
+                b = find_board_auto(img, size=self.config.board_size)
+                if b is not None:
+                    self.board = b
+                    self.on_status("自动检测到棋盘 ✓")
+                    break
             if time.time() > calib_wait:
                 self.on_status("未检测到棋盘：请在界面手动校准四个角")
                 break
@@ -107,11 +131,12 @@ class GoMasterLoop:
                 if self.board is None:
                     time.sleep(0.5)
                     continue
-                img = self.screenshot_fn() if self.screenshot_fn else None
+                img = self._grab()
                 if img is None:
                     time.sleep(0.3)
                     continue
                 state = recognize_stones(img, self.board)
+                self._mask_cursor(state, last_state)
                 self.state = state
                 self.on_state(state)
 
@@ -260,9 +285,10 @@ class GoMasterLoop:
             if self.config.auto_click and self.board:
                 if self.player.available():
                     if self.player.click_point(self.board, *pt) is not None:
+                        self._last_click_point = pt
                         self.on_status(f"已点击落子 {best}")
                     else:
-                        self.on_status(f"点击失败，建议落子 {best}")
+                        self.on_status(f"点击失败（{self.player.last_error}），建议落子 {best}")
                 else:
                     self.on_status(f"自动点击不可用（缺少 pyautogui），建议落子 {best}")
             else:
